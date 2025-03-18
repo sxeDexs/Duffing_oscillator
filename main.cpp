@@ -1,13 +1,13 @@
-#include <iostream>      // Для ввода-вывода в консоль
-#include <fstream>       // Для работы с файлами
+#include <iostream>      // Для ввода-вывода в консоль (cout, cerr)
+#include <fstream>       // Для работы с файлами (ofstream)
 #include <cmath>         // Для математических функций, таких как std::abs и std::cos
-#include <vector>        // Для использования std::vector
-#include <random>        // Для генерации случайных чисел
-#include <array>         // Для работы с массивами (хотя здесь не используется напрямую)
+#include <vector>        // Для использования std::vector — динамических массивов
+#include <random>        // Для генерации случайных чисел (random_device, mt19937, uniform_real_distribution)
+#include <array>         // Для работы с массивами (здесь не используется напрямую, можно убрать)
 
 // Структура для хранения состояния частицы: координаты (x) и скорости (v)
 struct State {
-    double x;  // Позиция частицы
+    double x;  // Позиция частицы в пространстве
     double v;  // Скорость частицы
 };
 
@@ -19,15 +19,15 @@ void duffing(const State& s, State& dsdt, double t,
     // dv/dt = -δv - αx - βx³ + γcos(ωt) — уравнение Дюффинга с затуханием, линейной и нелинейной упругостью, и внешней силой
 }
 
-// Универсальная функция для одного шага метода Рунге-Кутты
+// Универсальная функция для одного шага метода Рунге-Кутты (используется для RK4)
 void rk_step(State& s, double t, double dt, 
              const std::vector<double>& c, 
              const std::vector<std::vector<double>>& a,
              const std::vector<double>& b,
              double delta, double alpha, double beta, double gamma, double omega) {
-    int stages = c.size();  // Количество стадий метода (например, 4 для RK4, 13 для DP8)
+    int stages = c.size();  // Количество стадий метода (например, 4 для RK4)
     std::vector<State> k(stages);  // Вектор промежуточных значений k для каждой стадии
-    State s_temp = s;  // Временная копия состояния для вычислений
+    State s_temp = s;  // Временная копия состояния для промежуточных вычислений
 
     // Цикл по стадиям метода Рунге-Кутты
     for (int i = 0; i < stages; i++) {
@@ -46,8 +46,56 @@ void rk_step(State& s, double t, double dt,
         ds.x += b[i] * k[i].x;  // Взвешенная сумма k по x с коэффициентами b
         ds.v += b[i] * k[i].v;  // Взвешенная сумма k по v с коэффициентами b
     }
-    s.x += dt * ds.x;  // Обновляем координату
-    s.v += dt * ds.v;  // Обновляем скорость
+    s.x += dt * ds.x;  // Обновляем координату частицы
+    s.v += dt * ds.v;  // Обновляем скорость частицы
+}
+
+// Функция для метода Дорманда-Принса 8(5,3) с использованием FSAL
+void dp8_step(State& s, double t, double dt, 
+              State& k_last, bool first_step,  // k_last — последняя стадия, first_step — флаг первого шага
+              const std::vector<double>& c, 
+              const std::vector<std::vector<double>>& a,
+              const std::vector<double>& b,
+              double delta, double alpha, double beta, double gamma, double omega) {
+    const int stages = 13;  // Число стадий метода DP8 (фиксировано для метода 8(5,3))
+    std::vector<State> k(stages);  // Вектор промежуточных значений k для каждой стадии
+    State s_temp = s;  // Временная копия состояния для промежуточных вычислений
+
+    if (first_step) {
+        // Первый шаг: вычисляем все 13 стадий, так как нет предыдущего k_last
+        for (int i = 0; i < stages; i++) {
+            State sum_a_k = {0.0, 0.0};  // Сумма a[i][j] * k[j] для текущей стадии
+            for (int j = 0; j < i; j++) {
+                sum_a_k.x += a[i][j] * k[j].x;  // Взвешенная сумма по x
+                sum_a_k.v += a[i][j] * k[j].v;  // Взвешенная сумма по v
+            }
+            s_temp.x = s.x + dt * sum_a_k.x;  // Обновляем временное состояние x
+            s_temp.v = s.v + dt * sum_a_k.v;  // Обновляем временное состояние v
+            duffing(s_temp, k[i], t + c[i] * dt, delta, alpha, beta, gamma, omega);  // Вычисляем k[i]
+        }
+    } else {
+        // Последующие шаги: используем k_last как k[0] благодаря FSAL
+        k[0] = k_last;  // Первая стадия — это последняя стадия предыдущего шага
+        for (int i = 1; i < stages; i++) {  // Вычисляем только стадии с 1 по 12
+            State sum_a_k = {0.0, 0.0};  // Сумма a[i][j] * k[j]
+            for (int j = 0; j < i; j++) {
+                sum_a_k.x += a[i][j] * k[j].x;  // Взвешенная сумма по x
+                sum_a_k.v += a[i][j] * k[j].v;  // Взвешенная сумма по v
+            }
+            s_temp.x = s.x + dt * sum_a_k.x;  // Обновляем временное состояние x
+            s_temp.v = s.v + dt * sum_a_k.v;  // Обновляем временное состояние v
+            duffing(s_temp, k[i], t + c[i] * dt, delta, alpha, beta, gamma, omega);  // Вычисляем k[i]
+        }
+    }
+
+    State ds = {0.0, 0.0};  // Итоговое приращение состояния
+    for (int i = 0; i < stages; i++) {
+        ds.x += b[i] * k[i].x;  // Взвешенная сумма k по x с коэффициентами b
+        ds.v += b[i] * k[i].v;  // Взвешенная сумма k по v с коэффициентами b
+    }
+    s.x += dt * ds.x;  // Обновляем координату частицы
+    s.v += dt * ds.v;  // Обновляем скорость частицы
+    k_last = k[stages - 1];  // Сохраняем последнюю стадию (k[12]) для следующего шага
 }
 
 int main() {
@@ -103,14 +151,15 @@ int main() {
     };
 
     // Векторы для хранения состояния частиц для RK4 и DP8
-    std::vector<State> particles_rk4(N);
-    std::vector<State> particles_dp(N);
+    std::vector<State> particles_rk4(N);  // Состояния частиц для метода RK4
+    std::vector<State> particles_dp(N);   // Состояния частиц для метода DP8
+    std::vector<State> k_last(N);         // Вектор для хранения последней стадии DP8 для каждой частицы (FSAL)
 
     // Инициализация генератора случайных чисел
-    std::random_device rd;  // Источник случайности
-    std::mt19937 gen(rd());  // Генератор Мерсенна Твистера
-    std::uniform_real_distribution<double> dist_x(-10.0, 10.0);  // Равномерное распределение для x
-    std::uniform_real_distribution<double> dist_v(-10.0, 10.0);  // Равномерное распределение для v
+    std::random_device rd;  // Источник энтропии для генерации случайных чисел
+    std::mt19937 gen(rd());  // Генератор Мерсенна Твистера для случайных чисел
+    std::uniform_real_distribution<double> dist_x(-10.0, 10.0);  // Равномерное распределение для x в диапазоне [-10, 10]
+    std::uniform_real_distribution<double> dist_v(-10.0, 10.0);  // Равномерное распределение для v в диапазоне [-10, 10]
 
     // Задаём случайные начальные условия для всех частиц
     for (int i = 0; i < N; i++) {
@@ -119,17 +168,17 @@ int main() {
     }
 
     // Открываем файлы для записи результатов
-    std::ofstream fout_rk4("duffing_rk4.dat");  // Файл для данных RK4
-    std::ofstream fout_dp("duffing_dp.dat");    // Файл для данных DP8
-    std::ofstream fout_diff("diff.dat");        // Файл для средних локальных ошибок
+    std::ofstream fout_rk4("duffing_rk4.dat");  // Файл для данных RK4 (x и v для всех частиц)
+    std::ofstream fout_dp("duffing_dp.dat");    // Файл для данных DP8 (x и v для всех частиц)
+    std::ofstream fout_diff("diff.dat");        // Файл для средних локальных ошибок между RK4 и DP8
     if (!fout_rk4.is_open() || !fout_dp.is_open() || !fout_diff.is_open()) {
-        std::cerr << "Ошибка открытия файлов!\n";  // Сообщение об ошибке, если файлы не открылись
+        std::cerr << "Ошибка открытия файлов!\n";  // Сообщение об ошибке, если файлы не удалось открыть
         return 1;  // Завершаем программу с ошибкой
     }
 
-    double t = 0.0;  // Начальное время
-    double max_global_diff_x = 0.0;  // Максимальная глобальная разность по x
-    double max_global_diff_v = 0.0;  // Максимальная глобальная разность по v
+    double t = 0.0;  // Начальное время моделирования
+    double max_global_diff_x = 0.0;  // Максимальная глобальная разность по x между RK4 и DP8
+    double max_global_diff_v = 0.0;  // Максимальная глобальная разность по v между RK4 и DP8
 
     // Основной цикл по времени
     for (int i = 0; i < steps; i++) {
@@ -138,7 +187,7 @@ int main() {
         double max_local_diff_x = 0.0;  // Максимальная локальная разность по x на текущем шаге
         double max_local_diff_v = 0.0;  // Максимальная локальная разность по v на текущем шаге
 
-        // Цикл по частицам
+        // Цикл по частицам: запись данных и вычисление ошибок
         for (int j = 0; j < N; j++) {
             fout_rk4 << particles_rk4[j].x << " " << particles_rk4[j].v << " ";  // Записываем x и v для RK4
             fout_dp << particles_dp[j].x << " " << particles_dp[j].v << " ";     // Записываем x и v для DP8
@@ -148,8 +197,8 @@ int main() {
             sum_diff_x += diff_x;  // Накапливаем сумму разностей по x
             sum_diff_v += diff_v;  // Накапливаем сумму разностей по v
 
-            max_local_diff_x = std::max(max_local_diff_x, diff_x);  // Обновляем максимум по x на шаге
-            max_local_diff_v = std::max(max_local_diff_v, diff_v);  // Обновляем максимум по v на шаге
+            max_local_diff_x = std::max(max_local_diff_x, diff_x);  // Обновляем максимум по x на текущем шаге
+            max_local_diff_v = std::max(max_local_diff_v, diff_v);  // Обновляем максимум по v на текущем шаге
             max_global_diff_x = std::max(max_global_diff_x, diff_x);  // Обновляем глобальный максимум по x
             max_global_diff_v = std::max(max_global_diff_v, diff_v);  // Обновляем глобальный максимум по v
         }
@@ -160,23 +209,23 @@ int main() {
         fout_rk4 << "\n";  // Переход на новую строку после записи всех частиц для RK4
         fout_dp << "\n";   // Переход на новую строку после записи всех частиц для DP8
 
-        // Обновляем состояние всех частиц на следующем шаге
+        // Обновление состояния всех частиц на следующем шаге
         for (int j = 0; j < N; j++) {
             rk_step(particles_rk4[j], t, dt, c_rk4, a_rk4, b_rk4, delta, alpha, beta, gamma, omega);  // Шаг RK4
-            rk_step(particles_dp[j], t, dt, c_dp, a_dp, b_dp, delta, alpha, beta, gamma, omega);      // Шаг DP8
+            dp8_step(particles_dp[j], t, dt, k_last[j], (i == 0), c_dp, a_dp, b_dp, delta, alpha, beta, gamma, omega);  // Шаг DP8 с FSAL
         }
-        t += dt;  // Увеличиваем время на dt
+        t += dt;  // Увеличиваем время на шаг dt
     }
 
-    // Закрываем файлы
+    // Закрываем файлы после записи всех данных
     fout_rk4.close();
     fout_dp.close();
     fout_diff.close();
 
-    // Выводим итоговые сообщения
+    // Выводим итоговые сообщения в консоль
     std::cout << "Готово! Данные сохранены в 'duffing_rk4.dat', 'duffing_dp.dat' и 'diff.dat'.\n";
-    std::cout << "Максимальная глобальная разница по x: " << max_global_diff_x << "\n";
-    std::cout << "Максимальная глобальная разница по v: " << max_global_diff_v << "\n";
+    std::cout << "Максимальная глобальная разница по x: " << max_global_diff_x << "\n";  // Максимальная разность по x за всё время
+    std::cout << "Максимальная глобальная разница по v: " << max_global_diff_v << "\n";  // Максимальная разность по v за всё время
 
-    return 0;  // Успешное завершение программы
+    return 0;
 }
